@@ -133,6 +133,21 @@ const translations = {
     authSent: 'Перевірте пошту — посилання вже там.',
     authSendError: 'Не вдалося надіслати посилання. Спробуйте знову.',
     authInviteNotice: 'Вас запросили до бюджету. Авторизуйтеся, щоб приєднатися.',
+    authMethodMagic: 'Магічне посилання',
+    authMethodPassword: 'Пошта + пароль',
+    authPasswordLabel: 'Пароль',
+    authPasswordPlaceholder: 'Вигадайте пароль',
+    authPasswordModeSignIn: 'У мене вже є пароль',
+    authPasswordModeSignUp: 'Створити акаунт',
+    authPasswordSubmitSignIn: 'Увійти',
+    authPasswordSubmitSignUp: 'Створити акаунт',
+    authPasswordHintSignIn: 'Введіть пошту та пароль, які ви вже використовуєте.',
+    authPasswordHintSignUp: 'Створіть пароль мінімум з 6 символів і підтвердьте пошту.',
+    authPasswordRequirement: 'Пароль має містити щонайменше 6 символів.',
+    authPasswordSignInSuccess: 'Входимо у ваш обліковий запис...',
+    authPasswordSignUpSuccess: 'Готово! Перевірте пошту, щоб підтвердити акаунт.',
+    authPasswordError: 'Не вдалося обробити пошту чи пароль. Спробуйте ще раз.',
+    authProcessing: 'Опрацьовуємо...',
     signOut: 'Вийти',
     householdLabel: 'Домогосподарство',
     householdTitle: 'Сімейний доступ',
@@ -209,6 +224,21 @@ const translations = {
     authSent: 'Check your inbox — the link is on its way.',
     authSendError: 'We could not send the link. Try again.',
     authInviteNotice: 'Got an invite? Sign in to join the family budget.',
+    authMethodMagic: 'Magic link',
+    authMethodPassword: 'Email + password',
+    authPasswordLabel: 'Password',
+    authPasswordPlaceholder: 'Enter password',
+    authPasswordModeSignIn: 'I already have a password',
+    authPasswordModeSignUp: 'Create account',
+    authPasswordSubmitSignIn: 'Sign in',
+    authPasswordSubmitSignUp: 'Create account',
+    authPasswordHintSignIn: 'Enter the email and password you use for this app.',
+    authPasswordHintSignUp: 'Create a password with at least 6 characters and confirm via email.',
+    authPasswordRequirement: 'Password must be at least 6 characters long.',
+    authPasswordSignInSuccess: 'Signed in. Redirecting you...',
+    authPasswordSignUpSuccess: 'Account created! Check your inbox to confirm.',
+    authPasswordError: 'We could not process that email/password. Please try again.',
+    authProcessing: 'Working...',
     signOut: 'Sign out',
     householdLabel: 'Household',
     householdTitle: 'Family access',
@@ -288,6 +318,11 @@ const generateToken = () => {
   return Math.random().toString(36).slice(2)
 }
 
+const logDebug = (...args: unknown[]) => {
+  // unified logger to track Supabase/auth flows
+  console.log('[BudgetApp]', ...args)
+}
+
 function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [transactions, setTransactions] = useState<Transaction[]>([])
@@ -304,7 +339,11 @@ function App() {
   const [hasLoadError, setHasLoadError] = useState(false)
   const [hasSaveError, setHasSaveError] = useState(false)
   const [authEmail, setAuthEmail] = useState('')
+  const [authPassword, setAuthPassword] = useState('')
+  const [authMethod, setAuthMethod] = useState<'magic' | 'password'>('magic')
+  const [passwordMode, setPasswordMode] = useState<'signIn' | 'signUp'>('signIn')
   const [isSendingMagicLink, setIsSendingMagicLink] = useState(false)
+  const [isHandlingPasswordAuth, setIsHandlingPasswordAuth] = useState(false)
   const [authMessage, setAuthMessage] = useState<string | null>(null)
   const [authError, setAuthError] = useState<string | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
@@ -348,6 +387,7 @@ function App() {
       if (!isMounted) {
         return
       }
+      logDebug('Initial session fetched', data.session ? data.session.user?.id : 'none')
       setSession(data.session ?? null)
       if (!data.session) {
         setIsAccountLoading(false)
@@ -355,6 +395,7 @@ function App() {
     }
     void initSession()
     const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      logDebug('Auth state change', _event, nextSession?.user?.id)
       setSession(nextSession)
       setIsAccountLoading(Boolean(nextSession))
     })
@@ -365,6 +406,7 @@ function App() {
   }, [])
 
   const loadMemberships = useCallback(async (profileId: string) => {
+    logDebug('Loading memberships', profileId)
     const { data, error } = await supabase
       .from('household_members')
       .select('household_id, role, households(id, name)')
@@ -373,6 +415,7 @@ function App() {
     if (error) {
       throw error
     }
+    logDebug('Membership rows', data?.length ?? 0)
     const records = (data ?? []) as HouseholdMembershipRow[]
     return records.map((entry) => ({
       household_id: entry.household_id as string,
@@ -400,6 +443,7 @@ function App() {
   )
 
   const loadOrCreateProfile = useCallback(async (user: User) => {
+    logDebug('Loading profile', user.id)
     const { data, error } = await supabase
       .from('profiles')
       .select('id, email, default_household_id')
@@ -410,6 +454,7 @@ function App() {
     }
     let currentProfile = data as Profile | null
     if (!currentProfile) {
+      logDebug('Profile missing, creating new', user.id)
       const { data: created, error: createError } = await supabase
         .from('profiles')
         .insert({ id: user.id, email: user.email })
@@ -418,6 +463,7 @@ function App() {
       if (createError) {
         throw createError
       }
+      logDebug('Profile created', created)
       currentProfile = created as Profile
     }
     return currentProfile
@@ -426,24 +472,28 @@ function App() {
   const ensureDefaultHousehold = useCallback(
     async (user: User, profileRecord: Profile) => {
       if (profileRecord.default_household_id) {
+        logDebug('Profile already has default household', profileRecord.default_household_id)
         return profileRecord
       }
       const fallbackName = user.email ? `${user.email.split('@')[0]} family` : 'Family budget'
+      logDebug('Creating fallback household', { fallbackName, owner: user.id })
       const { data: household, error: householdError } = await supabase
         .from('households')
-        .insert({ name: fallbackName, owner_id: profileRecord.id })
+        .insert({ name: fallbackName })
         .select('id')
         .single()
       if (householdError) {
         throw householdError
       }
       const householdId = household.id as string
+      logDebug('Household created', householdId)
       const { error: memberError } = await supabase
         .from('household_members')
         .insert({ household_id: householdId, profile_id: profileRecord.id, role: 'owner' })
       if (memberError) {
         throw memberError
       }
+      logDebug('Owner membership inserted', { householdId, profileId: profileRecord.id })
       const { data: updatedProfile, error: updateError } = await supabase
         .from('profiles')
         .update({ default_household_id: householdId })
@@ -453,6 +503,7 @@ function App() {
       if (updateError) {
         throw updateError
       }
+      logDebug('Profile updated with default household', updatedProfile)
       return updatedProfile as Profile
     },
     [],
@@ -460,12 +511,14 @@ function App() {
 
   const bootstrapAccount = useCallback(
     async (user: User) => {
+      logDebug('Bootstrapping account', user.id)
       try {
         setAccountError(null)
         let profileRecord = await loadOrCreateProfile(user)
         profileRecord = await ensureDefaultHousehold(user, profileRecord)
         setProfile(profileRecord)
         const list = await refreshMemberships(profileRecord.id)
+        logDebug('Membership list', list.map((entry) => entry.household_id))
         const defaultHousehold =
           profileRecord.default_household_id && list.some((entry) => entry.household_id === profileRecord.default_household_id)
             ? profileRecord.default_household_id
@@ -473,6 +526,7 @@ function App() {
         setActiveHouseholdId((prev) => prev ?? defaultHousehold)
       } catch (error) {
         console.error('Failed to bootstrap account', error)
+        logDebug('Bootstrap error', error)
         setAccountError('account')
       } finally {
         setIsAccountLoading(false)
@@ -500,6 +554,7 @@ function App() {
       setIsAcceptingInvite(true)
       setInviteError(null)
       try {
+        logDebug('Accepting invite', { token, userEmail })
         const { data, error } = await supabase
           .from('household_invites')
           .select('id, household_id, email')
@@ -509,6 +564,7 @@ function App() {
         if (error || !data) {
           throw error ?? new Error('Invite not found')
         }
+        logDebug('Invite found', data.household_id)
         if (data.email && data.email.toLowerCase() !== userEmail.toLowerCase()) {
           throw new Error('Invite email mismatch')
         }
@@ -519,6 +575,7 @@ function App() {
         if (upsertError) {
           throw upsertError
         }
+        logDebug('Membership upserted via invite', { householdId, profileId })
         await supabase
           .from('household_invites')
           .update({ status: 'accepted', accepted_profile: profileId })
@@ -529,6 +586,7 @@ function App() {
         setPendingInviteToken(null)
       } catch (error) {
         console.error('Failed to accept invite', error)
+        logDebug('Invite accept error', error)
         setInviteError(t.inviteFailed)
       } finally {
         setIsAcceptingInvite(false)
@@ -550,6 +608,7 @@ function App() {
       setIsLoading(false)
       return
     }
+    logDebug('Fetching transactions', activeHouseholdId)
     setIsLoading(true)
     setHasLoadError(false)
     try {
@@ -561,9 +620,11 @@ function App() {
       if (error) {
         throw error
       }
+      logDebug('Transactions loaded', data?.length ?? 0)
       setTransactions((data ?? []) as Transaction[])
     } catch (error) {
       console.error('Failed to load transactions from Supabase', error)
+      logDebug('Transactions error', error)
       setHasLoadError(true)
     } finally {
       setIsLoading(false)
@@ -571,6 +632,7 @@ function App() {
   }, [activeHouseholdId])
 
   const loadHouseholdMembers = useCallback(async (householdId: string) => {
+    logDebug('Loading household members', householdId)
     const { data, error } = await supabase
       .from('household_members')
       .select('profile_id, role, profiles(id, email)')
@@ -578,6 +640,7 @@ function App() {
       .order('role', { ascending: true })
     if (error) {
       console.error('Failed to load members', error)
+      logDebug('Household members error', error)
       return
     }
     const records = (data ?? []) as HouseholdMemberRow[]
@@ -626,11 +689,28 @@ function App() {
     setSelectedCategory('all')
   }, [activeHouseholdId])
 
+  const handleAuthMethodChange = (method: 'magic' | 'password') => {
+    setAuthMethod(method)
+    setAuthMessage(null)
+    setAuthError(null)
+    if (method === 'magic') {
+      setPasswordMode('signIn')
+      setAuthPassword('')
+    }
+  }
+
+  const handlePasswordModeChange = (mode: 'signIn' | 'signUp') => {
+    setPasswordMode(mode)
+    setAuthMessage(null)
+    setAuthError(null)
+  }
+
   const handleMagicLink = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!authEmail.trim()) {
       return
     }
+    logDebug('Sending magic link', { email: authEmail.trim().toLowerCase() })
     setIsSendingMagicLink(true)
     setAuthMessage(null)
     setAuthError(null)
@@ -643,16 +723,72 @@ function App() {
       if (error) {
         throw error
       }
+      logDebug('Magic link sent successfully')
       setAuthMessage(t.authSent)
     } catch (error) {
       console.error('Failed to send magic link', error)
+      logDebug('Magic link error', error)
       setAuthError(t.authSendError)
     } finally {
       setIsSendingMagicLink(false)
     }
   }
 
+  const handlePasswordAuth = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const email = authEmail.trim().toLowerCase()
+    if (!email) {
+      setAuthError(t.authPasswordError)
+      return
+    }
+    if (authPassword.length < 6) {
+      setAuthError(t.authPasswordRequirement)
+      return
+    }
+    setIsHandlingPasswordAuth(true)
+    setAuthMessage(null)
+    setAuthError(null)
+    try {
+      if (passwordMode === 'signIn') {
+        logDebug('Attempt password sign-in', { email })
+        const { error } = await supabase.auth.signInWithPassword({
+          email,
+          password: authPassword,
+        })
+        if (error) {
+          throw error
+        }
+        logDebug('Password sign-in success')
+        setAuthMessage(t.authPasswordSignInSuccess)
+      } else {
+        logDebug('Attempt password sign-up', { email })
+        const redirectTo = typeof window !== 'undefined' ? window.location.origin : undefined
+        const { error } = await supabase.auth.signUp({
+          email,
+          password: authPassword,
+          options: redirectTo ? { emailRedirectTo: redirectTo } : undefined,
+        })
+        if (error) {
+          throw error
+        }
+        logDebug('Password sign-up success')
+        setAuthMessage(t.authPasswordSignUpSuccess)
+      }
+      setAuthPassword('')
+      if (passwordMode === 'signUp') {
+        setPasswordMode('signIn')
+      }
+    } catch (error) {
+      console.error('Failed to handle password auth', error)
+      logDebug('Password auth error', { passwordMode, error })
+      setAuthError(t.authPasswordError)
+    } finally {
+      setIsHandlingPasswordAuth(false)
+    }
+  }
+
   const handleSignOut = async () => {
+    logDebug('Signing out user', session?.user?.id)
     await supabase.auth.signOut()
     setSession(null)
     setProfile(null)
@@ -661,6 +797,7 @@ function App() {
   }
 
   const handleHouseholdChange = async (value: string) => {
+    logDebug('Switching household', value)
     setActiveHouseholdId(value)
     if (!profile?.id) {
       return
@@ -681,6 +818,7 @@ function App() {
     if (!activeHouseholdId || !inviteEmail.trim()) {
       return
     }
+    logDebug('Creating invite', { household: activeHouseholdId, inviteEmail })
     setIsSendingInvite(true)
     setInviteMessage(null)
     setInviteError(null)
@@ -698,6 +836,7 @@ function App() {
       if (error || !data) {
         throw error ?? new Error('Invite not created')
       }
+      logDebug('Invite token created', data.token)
       const origin = typeof window !== 'undefined' ? window.location.origin : ''
       const link = `${origin}?invite=${data.token}`
       setInviteLink(link)
@@ -705,6 +844,7 @@ function App() {
       setInviteEmail('')
     } catch (error) {
       console.error('Failed to create invite', error)
+      logDebug('Invite creation error', error)
       setInviteError(t.inviteError)
     } finally {
       setIsSendingInvite(false)
@@ -719,11 +859,13 @@ function App() {
       if (navigator?.clipboard?.writeText) {
         await navigator.clipboard.writeText(inviteLink)
         setInviteMessage(t.inviteCopySuccess)
+        logDebug('Invite link copied')
       } else {
         throw new Error('Clipboard not available')
       }
     } catch (error) {
       console.error('Failed to copy invite', error)
+      logDebug('Invite copy error', error)
       setInviteError(t.inviteCopyError)
     }
   }
@@ -805,6 +947,7 @@ function App() {
     event.preventDefault()
 
     if (!activeHouseholdId) {
+      logDebug('Submit transaction aborted, missing household')
       return
     }
 
@@ -830,9 +973,11 @@ function App() {
 
     if (error || !data) {
       console.error('Failed to save transaction to Supabase', error)
+      logDebug('Transaction save error', error)
       setHasSaveError(true)
       return
     }
+    logDebug('Transaction saved', data.id)
 
     setTransactions((previous) => [data as Transaction, ...previous])
     setSelectedCategory('all')
@@ -853,21 +998,93 @@ function App() {
           <h1>{t.authTitle}</h1>
           <p className="subtitle">{t.authSubtitle}</p>
           {pendingInviteToken && <div className="auth-notice">{t.authInviteNotice}</div>}
-          <form className="auth-form" onSubmit={handleMagicLink}>
-            <label>
-              {t.authEmailLabel}
-              <input
-                type="email"
-                value={authEmail}
-                onChange={(event) => setAuthEmail(event.target.value)}
-                placeholder={t.authEmailPlaceholder}
-                required
-              />
-            </label>
-            <button type="submit" disabled={isSendingMagicLink}>
-              {isSendingMagicLink ? t.transactionsLoading : t.authSendLink}
+          <div className="auth-tabs" role="tablist">
+            <button
+              type="button"
+              className={authMethod === 'magic' ? 'active' : ''}
+              onClick={() => handleAuthMethodChange('magic')}
+            >
+              {t.authMethodMagic}
             </button>
-          </form>
+            <button
+              type="button"
+              className={authMethod === 'password' ? 'active' : ''}
+              onClick={() => handleAuthMethodChange('password')}
+            >
+              {t.authMethodPassword}
+            </button>
+          </div>
+          {authMethod === 'magic' ? (
+            <form className="auth-form" onSubmit={handleMagicLink}>
+              <label>
+                {t.authEmailLabel}
+                <input
+                  type="email"
+                  value={authEmail}
+                  onChange={(event) => setAuthEmail(event.target.value)}
+                  placeholder={t.authEmailPlaceholder}
+                  autoComplete="email"
+                  required
+                />
+              </label>
+              <button type="submit" disabled={isSendingMagicLink}>
+                {isSendingMagicLink ? t.authProcessing : t.authSendLink}
+              </button>
+            </form>
+          ) : (
+            <form className="auth-form" onSubmit={handlePasswordAuth}>
+              <div className="password-mode-toggle" role="group">
+                <button
+                  type="button"
+                  className={passwordMode === 'signIn' ? 'active' : ''}
+                  onClick={() => handlePasswordModeChange('signIn')}
+                >
+                  {t.authPasswordModeSignIn}
+                </button>
+                <button
+                  type="button"
+                  className={passwordMode === 'signUp' ? 'active' : ''}
+                  onClick={() => handlePasswordModeChange('signUp')}
+                >
+                  {t.authPasswordModeSignUp}
+                </button>
+              </div>
+              <p className="auth-hint">
+                {passwordMode === 'signIn' ? t.authPasswordHintSignIn : t.authPasswordHintSignUp}
+              </p>
+              <label>
+                {t.authEmailLabel}
+                <input
+                  type="email"
+                  value={authEmail}
+                  onChange={(event) => setAuthEmail(event.target.value)}
+                  placeholder={t.authEmailPlaceholder}
+                  autoComplete="email"
+                  required
+                />
+              </label>
+              <label>
+                {t.authPasswordLabel}
+                <input
+                  type="password"
+                  value={authPassword}
+                  onChange={(event) => setAuthPassword(event.target.value)}
+                  placeholder={t.authPasswordPlaceholder}
+                  autoComplete={passwordMode === 'signIn' ? 'current-password' : 'new-password'}
+                  minLength={6}
+                  required
+                />
+              </label>
+              <p className="password-hint">{t.authPasswordRequirement}</p>
+              <button type="submit" disabled={isHandlingPasswordAuth}>
+                {isHandlingPasswordAuth
+                  ? t.authProcessing
+                  : passwordMode === 'signIn'
+                    ? t.authPasswordSubmitSignIn
+                    : t.authPasswordSubmitSignUp}
+              </button>
+            </form>
+          )}
           {authMessage && <p className="success-text">{authMessage}</p>}
           {authError && <p className="form-error">{authError}</p>}
         </div>
