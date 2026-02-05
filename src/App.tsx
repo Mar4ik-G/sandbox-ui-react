@@ -287,6 +287,7 @@ const defaultSettings = {
 type Settings = typeof defaultSettings
 
 const settingsKey = 'budget-tracker-settings'
+const inviteTokenKey = 'budget-invite-token'
 
 const loadSettings = (): Settings => {
   if (typeof window === 'undefined') {
@@ -371,12 +372,18 @@ function App() {
     const token = params.get('invite')
     if (token) {
       setPendingInviteToken(token)
+      window.localStorage.setItem(inviteTokenKey, token)
       params.delete('invite')
       const newQuery = params.toString()
       const nextUrl = `${window.location.origin}${window.location.pathname}${newQuery ? `?${newQuery}` : ''}${
         window.location.hash
       }`
       window.history.replaceState({}, '', nextUrl)
+      return
+    }
+    const storedInvite = window.localStorage.getItem(inviteTokenKey)
+    if (storedInvite) {
+      setPendingInviteToken(storedInvite)
     }
   }, [])
 
@@ -557,12 +564,14 @@ function App() {
         logDebug('Accepting invite', { token, userEmail })
         const { data, error } = await supabase
           .from('household_invites')
-          .select('id, household_id, email')
+          .select('id, household_id, email, status')
           .eq('token', token)
-          .eq('status', 'pending')
           .single()
         if (error || !data) {
           throw error ?? new Error('Invite not found')
+        }
+        if (data.status && data.status !== 'pending') {
+          throw new Error('Invite already used')
         }
         logDebug('Invite found', data.household_id)
         if (data.email && data.email.toLowerCase() !== userEmail.toLowerCase()) {
@@ -584,6 +593,9 @@ function App() {
         setActiveHouseholdId(householdId)
         setInviteMessage(t.inviteAccepted)
         setPendingInviteToken(null)
+        if (typeof window !== 'undefined') {
+          window.localStorage.removeItem(inviteTokenKey)
+        }
       } catch (error) {
         console.error('Failed to accept invite', error)
         logDebug('Invite accept error', error)
