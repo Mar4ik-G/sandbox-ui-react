@@ -49,6 +49,7 @@ Family budgeting app built with React + Vite + Supabase. You can add expenses, i
      category text not null,
      date date not null default now(),
      household_id uuid not null references households(id) on delete cascade,
+     created_by uuid references profiles(id) on delete set null,
      created_at timestamptz default now()
    );
 
@@ -82,6 +83,22 @@ Family budgeting app built with React + Vite + Supabase. You can add expenses, i
          where hm.household_id = household_invites.household_id
            and hm.profile_id = auth.uid()
            and hm.role = 'owner'
+       )
+     );
+
+   create policy "Invite status update" on public.household_invites
+     for update using (
+       exists (
+         select 1 from public.household_members hm
+         where hm.household_id = household_invites.household_id
+           and hm.profile_id = auth.uid()
+       )
+     )
+     with check (
+       exists (
+         select 1 from public.household_members hm
+         where hm.household_id = household_invites.household_id
+           and hm.profile_id = auth.uid()
        )
      );
 

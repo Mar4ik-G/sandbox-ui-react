@@ -5,6 +5,11 @@ import type { Session, User } from '@supabase/supabase-js'
 import './App.css'
 import { supabase } from './util/supabaseClient'
 
+type TransactionAuthor = {
+  id: string
+  email: string | null
+}
+
 type Transaction = {
   id: string
   description: string
@@ -12,6 +17,8 @@ type Transaction = {
   category: string
   date: string
   household_id: string
+  created_by: string | null
+  author: TransactionAuthor | null
 }
 
 type Language = 'ua' | 'en'
@@ -111,6 +118,8 @@ const translations = {
     monthlyTrendEmpty: 'Даних поки немає',
     transactionsTitle: 'Витрати',
     transactionsSubtitle: 'Фільтруйте категорії, щоб бачити потрібні витрати.',
+    transactionAuthor: (author: string) => `Додав(ла): ${author}`,
+    transactionAuthorUnknown: 'невідомо',
     transactionsLoading: 'Завантаження витрат...',
     transactionsError: 'Не вдалося завантажити витрати. Спробуйте ще раз.',
     retryLabel: 'Спробувати ще раз',
@@ -202,6 +211,8 @@ const translations = {
     monthlyTrendEmpty: 'No data yet',
     transactionsTitle: 'Expenses',
     transactionsSubtitle: 'Use categories to focus on specific spending.',
+    transactionAuthor: (author: string) => `Added by ${author}`,
+    transactionAuthorUnknown: 'unknown',
     transactionsLoading: 'Loading expenses...',
     transactionsError: 'We could not load your expenses. Please try again.',
     retryLabel: 'Retry',
@@ -324,6 +335,17 @@ const logDebug = (...args: unknown[]) => {
   console.log('[BudgetApp]', ...args)
 }
 
+const transactionSelect = [
+  'id',
+  'description',
+  'amount',
+  'category',
+  'date',
+  'household_id',
+  'created_by',
+  'author:profiles!transactions_created_by_fkey(id, email)',
+].join(', ')
+
 function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [transactions, setTransactions] = useState<Transaction[]>([])
@@ -363,6 +385,21 @@ function App() {
 
   const locale = localeMap[settings.language]
   const t = translations[settings.language]
+
+  const buildInviteAwareRedirect = useCallback(() => {
+    if (typeof window === 'undefined') {
+      return undefined
+    }
+    const origin = window.location.origin
+    try {
+      const storedToken = window.localStorage.getItem(inviteTokenKey)
+      const token = pendingInviteToken ?? storedToken
+      return token ? `${origin}?invite=${encodeURIComponent(token)}` : origin
+    } catch (error) {
+      console.warn('Failed to access invite token storage', error)
+      return origin
+    }
+  }, [pendingInviteToken])
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -566,9 +603,12 @@ function App() {
           .from('household_invites')
           .select('id, household_id, email, status')
           .eq('token', token)
-          .single()
-        if (error || !data) {
-          throw error ?? new Error('Invite not found')
+          .maybeSingle()
+        if (error) {
+          throw error
+        }
+        if (!data) {
+          throw new Error('Invite not found')
         }
         if (data.status && data.status !== 'pending') {
           throw new Error('Invite already used')
@@ -585,10 +625,14 @@ function App() {
           throw upsertError
         }
         logDebug('Membership upserted via invite', { householdId, profileId })
-        await supabase
+        const { error: inviteStatusError } = await supabase
           .from('household_invites')
           .update({ status: 'accepted', accepted_profile: profileId })
           .eq('id', data.id)
+        if (inviteStatusError) {
+          console.warn('Failed to update invite status', inviteStatusError)
+          logDebug('Invite status update skipped', inviteStatusError)
+        }
         await refreshMemberships(profileId)
         setActiveHouseholdId(householdId)
         setInviteMessage(t.inviteAccepted)
@@ -626,7 +670,7 @@ function App() {
     try {
       const { data, error } = await supabase
         .from('transactions')
-        .select('*')
+        .select(transactionSelect)
         .eq('household_id', activeHouseholdId)
         .order('date', { ascending: false })
       if (error) {
@@ -727,10 +771,10 @@ function App() {
     setAuthMessage(null)
     setAuthError(null)
     try {
-      const redirectTo = typeof window !== 'undefined' ? window.location.origin : undefined
+      const redirectTo = buildInviteAwareRedirect()
       const { error } = await supabase.auth.signInWithOtp({
         email: authEmail.trim().toLowerCase(),
-        options: { emailRedirectTo: redirectTo },
+        options: redirectTo ? { emailRedirectTo: redirectTo } : undefined,
       })
       if (error) {
         throw error
@@ -774,7 +818,7 @@ function App() {
         setAuthMessage(t.authPasswordSignInSuccess)
       } else {
         logDebug('Attempt password sign-up', { email })
-        const redirectTo = typeof window !== 'undefined' ? window.location.origin : undefined
+        const redirectTo = buildInviteAwareRedirect()
         const { error } = await supabase.auth.signUp({
           email,
           password: authPassword,
@@ -978,8 +1022,9 @@ function App() {
         category: formState.category,
         date: formState.date,
         household_id: activeHouseholdId,
+        created_by: profile?.id ?? session?.user?.id ?? null,
       })
-      .select('*')
+      .select(transactionSelect)
       .single()
     setIsSaving(false)
 
@@ -1422,6 +1467,7 @@ function App() {
         <ul className="transaction-list">
           {filteredTransactions.map((txn) => {
             const category = categories.find((cat) => cat.id === txn.category)
+            const authorLabel = txn.author?.email ?? t.transactionAuthorUnknown
             return (
               <li key={txn.id}>
                 <div>
@@ -1431,7 +1477,8 @@ function App() {
                     {new Intl.DateTimeFormat(locale, {
                       month: 'short',
                       day: 'numeric',
-                    }).format(new Date(txn.date))}
+                    }).format(new Date(txn.date))}{' '}
+                    • {t.transactionAuthor(authorLabel)}
                   </p>
                 </div>
                 <span>{formatAmount(txn.amount)}</span>
